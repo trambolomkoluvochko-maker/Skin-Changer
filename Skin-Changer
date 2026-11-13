@@ -1,0 +1,564 @@
+-- ==========================================
+-- R6/R15 CARD SELECTOR MORPH SCRIPT v3 (CAPRI: EMOTIONS + OUTFITS + R6 TOGGLE)
+-- ==========================================
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local selectedSkinIndex = nil
+local emotionChoice = {}  -- выбранная эмоция для каждого скина
+local outfitChoice = {}   -- выбранный вариант одежды для каждого скина
+local r6Enabled = {}      -- включены ли R6-детальки (по умолчанию да)
+local uiBusy = false
+local morphConn = nil
+
+local Skins = {
+    {
+        Name = "Capri (Cyberpunk)",
+        Description = "WE MAKING A FANARTS WITH THIS ONE🔥🔥",
+        Outfits = {
+            {Name = "👕 Вариант 1", ShirtId = 113791677446021, PantsId = 98356572400331},
+            {Name = "👕 Вариант 2", ShirtId = 100899893266277, PantsId = 133930001642126},
+        },
+        AccessoryIDs = {135035770185274},
+        R6ExclusiveIDs = {113581820997706, 102607153727345, 94828195843199},
+        Emotions = {
+            {Name = "😉 Подмигивание", Id = 108765460813211},
+            {Name = "😐 Нейтральное", Id = 103446823336775},
+            {Name = "😊 Счастливое", Id = 137692024523984},
+        },
+        FaceTextureId = "",
+        TorsoMeshID = 48112070,
+        SkinColor = Color3.fromHex("#181818"),
+        ColorStart = Color3.fromRGB(20, 60, 80),
+        ColorEnd = Color3.fromRGB(10, 20, 35)
+    }
+}
+
+local function getObjects(id)
+    if not id or id == 0 then return {} end
+    local success, result = pcall(function()
+        return game:GetObjects("rbxassetid://" .. tostring(id))
+    end)
+    if success and result then return result end
+    return {}
+end
+
+local function tagItem(item)
+    if item then item:SetAttribute("IsMorphItem", true) end
+end
+
+local function isMorphItem(item)
+    return item:GetAttribute("IsMorphItem") == true
+end
+
+local function shouldRemove(item)
+    if isMorphItem(item) then return false end
+    if item:IsA("Shirt") or item:IsA("Pants") or item:IsA("ShirtGraphic")
+       or item:IsA("Accessory") or item:IsA("CharacterMesh")
+       or item:IsA("Decal") or item:IsA("BodyColors") then
+        return true
+    end
+    return false
+end
+
+-- Загружает аксессуар по ID и крепит на персонажа. extraAttr - метка для группы (лицо / R6)
+local function loadAndAttach(character, id, extraAttr)
+    local head = character:FindFirstChild("Head")
+    if not head then return end
+    for _, root in ipairs(getObjects(id)) do
+        local items = root:GetDescendants()
+        table.insert(items, root)
+        for _, item in ipairs(items) do
+            if item:IsA("Accessory") then
+                local handle = item:FindFirstChild("Handle") or item:FindFirstChildWhichIsA("BasePart")
+                if handle then
+                    handle.CanCollide = false handle.Massless = true handle.Transparency = 0
+                    local att = handle:FindFirstChildWhichIsA("Attachment")
+                    local targetAtt = att and character:FindFirstChild(att.Name, true)
+                    local parentPart = head
+                    if targetAtt and targetAtt.Parent and targetAtt.Parent:IsA("BasePart") then
+                        parentPart = targetAtt.Parent
+                        handle.CFrame = targetAtt.WorldCFrame * att.CFrame:Inverse()
+                    else
+                        handle.CFrame = head.CFrame
+                    end
+                    local weld = Instance.new("WeldConstraint")
+                    weld.Part0 = parentPart weld.Part1 = handle weld.Parent = handle
+                    tagItem(item)
+                    if extraAttr then item:SetAttribute(extraAttr, true) end
+                    item.Parent = character
+                end
+            end
+        end
+    end
+end
+
+-- Одежда выбранного варианта
+local function loadClothes(character, config, skinIndex)
+    for _, c in ipairs(character:GetChildren()) do
+        if c:GetAttribute("MorphClothes") then c:Destroy() end
+    end
+    local outfit = config.Outfits and (config.Outfits[outfitChoice[skinIndex] or 1] or config.Outfits[1])
+        or {ShirtId = config.ShirtId, PantsId = config.PantsId}
+
+    for _, obj in ipairs(getObjects(outfit.ShirtId)) do
+        local shirt = obj:IsA("Shirt") and obj or obj:FindFirstChildWhichIsA("Shirt", true)
+        if shirt then tagItem(shirt) shirt:SetAttribute("MorphClothes", true) shirt.Parent = character end
+    end
+    for _, obj in ipairs(getObjects(outfit.PantsId)) do
+        local pants = obj:IsA("Pants") and obj or obj:FindFirstChildWhichIsA("Pants", true)
+        if pants then tagItem(pants) pants:SetAttribute("MorphClothes", true) pants.Parent = character end
+    end
+end
+
+local function loadR6Parts(character, config)
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if not (hum and hum.RigType == Enum.HumanoidRigType.R6) then return end
+    if not config.R6ExclusiveIDs then return end
+    for _, id in ipairs(config.R6ExclusiveIDs) do
+        loadAndAttach(character, id, "MorphR6")
+        task.wait(0.02)
+    end
+end
+
+local openCardDeckFunc = nil
+local refreshMenuFunc = nil
+
+local function applyMorph(character, targetIndex)
+    if not character then return end
+    local choiceIndex = targetIndex or selectedSkinIndex
+    if not choiceIndex then return end
+    local config = Skins[choiceIndex]
+    if not config then return end
+
+    local head = character:WaitForChild("Head", 5)
+    if not head then return end
+
+    -- Убираем старые вещи (и наши прошлые, чтобы не дублировались)
+    for _, item in ipairs(character:GetChildren()) do
+        if isMorphItem(item) or shouldRemove(item) then item:Destroy() end
+    end
+    for _, item in ipairs(head:GetChildren()) do
+        if item:IsA("Decal") then item:Destroy() end
+    end
+
+    local function forceSkinColor()
+        local partNames = {
+            "Head", "Torso", "UpperTorso", "LowerTorso",
+            "Left Arm", "Right Arm", "Left Leg", "Right Leg",
+            "LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
+            "LeftHand", "RightHand", "LeftUpperLeg", "RightUpperLeg",
+            "LeftLowerLeg", "RightLowerLeg", "LeftFoot", "RightFoot"
+        }
+        for _, partName in ipairs(partNames) do
+            local part = character:FindFirstChild(partName)
+            if part and part:IsA("BasePart") then
+                part.Color = config.SkinColor
+                part.Material = Enum.Material.SmoothPlastic
+                part.Transparency = 0
+            end
+        end
+    end
+
+    if morphConn then morphConn:Disconnect() end
+    morphConn = character.ChildAdded:Connect(function(child)
+        task.wait()
+        if shouldRemove(child) then child:Destroy() forceSkinColor() end
+    end)
+
+    task.spawn(function()
+        for i = 1, 5 do
+            forceSkinColor()
+            local bc = character:FindFirstChildOfClass("BodyColors")
+            if bc then bc:Destroy() end
+            task.wait(0.1)
+        end
+    end)
+
+    if config.FaceTextureId and config.FaceTextureId ~= "" then
+        local newFace = Instance.new("Decal")
+        newFace.Name = "face"
+        newFace.Texture = config.FaceTextureId
+        newFace.Face = Enum.NormalId.Front
+        tagItem(newFace)
+        newFace.Parent = head
+    end
+
+    if config.TorsoMeshID and config.TorsoMeshID ~= 0 and character:FindFirstChild("Torso") then
+        local torsoMesh = Instance.new("CharacterMesh")
+        torsoMesh.Name = "CustomTorso"
+        torsoMesh.BodyPart = Enum.BodyPart.Torso
+        torsoMesh.MeshId = config.TorsoMeshID
+        tagItem(torsoMesh)
+        torsoMesh.Parent = character
+    end
+
+    loadClothes(character, config, choiceIndex)
+
+    for _, itemId in ipairs(config.AccessoryIDs) do
+        loadAndAttach(character, itemId, nil)
+        task.wait(0.02)
+    end
+
+    -- R6-детальки (только на R6 и только если включены в меню)
+    if r6Enabled[choiceIndex] ~= false then
+        loadR6Parts(character, config)
+    end
+
+    -- Эмоция (лицо)
+    if config.Emotions then
+        local emo = config.Emotions[emotionChoice[choiceIndex] or 1]
+        if emo then loadAndAttach(character, emo.Id, "MorphFace") end
+    end
+end
+
+-- Смена эмоции без перезагрузки всего скина
+local function setEmotion(skinIndex, emoIndex)
+    if uiBusy then return end
+    emotionChoice[skinIndex] = emoIndex
+    if refreshMenuFunc then refreshMenuFunc() end
+
+    local char = LocalPlayer.Character
+    local skin = Skins[skinIndex]
+    if not (char and skin and skin.Emotions and selectedSkinIndex == skinIndex) then return end
+
+    uiBusy = true
+    for _, c in ipairs(char:GetChildren()) do
+        if c:GetAttribute("MorphFace") then c:Destroy() end
+    end
+    local emo = skin.Emotions[emoIndex]
+    if emo then loadAndAttach(char, emo.Id, "MorphFace") end
+    uiBusy = false
+end
+
+-- Смена варианта одежды
+local function setOutfit(skinIndex, outfitIndex)
+    if uiBusy then return end
+    outfitChoice[skinIndex] = outfitIndex
+    if refreshMenuFunc then refreshMenuFunc() end
+
+    local char = LocalPlayer.Character
+    local skin = Skins[skinIndex]
+    if not (char and skin and selectedSkinIndex == skinIndex) then return end
+
+    uiBusy = true
+    loadClothes(char, skin, skinIndex)
+    uiBusy = false
+end
+
+-- Включение/выключение R6-деталей
+local function setR6Parts(skinIndex, enabled)
+    if uiBusy then return end
+    r6Enabled[skinIndex] = enabled
+    if refreshMenuFunc then refreshMenuFunc() end
+
+    local char = LocalPlayer.Character
+    local skin = Skins[skinIndex]
+    if not (char and skin and selectedSkinIndex == skinIndex) then return end
+
+    uiBusy = true
+    for _, c in ipairs(char:GetChildren()) do
+        if c:GetAttribute("MorphR6") then c:Destroy() end
+    end
+    if enabled then loadR6Parts(char, skin) end
+    uiBusy = false
+end
+
+-- Делает кнопку перетаскиваемой (двигает target)
+local function makeDraggable(handle, target)
+    local dragging, dragStart, startPos = false, nil, nil
+    local moved = false
+
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPos = target.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 6 then moved = true end
+            if moved then
+                target.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y
+                )
+            end
+        end
+    end)
+
+    return function() return moved end
+end
+
+local function createCardUI()
+    if PlayerGui:FindFirstChild("CardMenuGui") then PlayerGui.CardMenuGui:Destroy() end
+
+    local CARD_W, CARD_H, CARD_STEP = 110, 170, 118
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "CardMenuGui"
+    screenGui.ResetOnSpawn = false
+
+    local dock = Instance.new("Frame")
+    dock.Size = UDim2.new(0, 62, 0, 34)
+    dock.Position = UDim2.new(0, 15, 0.4, 0)
+    dock.BackgroundTransparency = 1
+    dock.Parent = screenGui
+
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Size = UDim2.new(0, 34, 0, 34)
+    toggleBtn.Position = UDim2.new(0, 0, 0, 0)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    toggleBtn.BackgroundTransparency = 0.2
+    toggleBtn.Text = "🎴"
+    toggleBtn.TextSize = 18
+    toggleBtn.Font = Enum.Font.GothamBold
+    toggleBtn.Parent = dock
+    Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 10)
+
+    local gearBtn = Instance.new("TextButton")
+    gearBtn.Size = UDim2.new(0, 22, 0, 22)
+    gearBtn.Position = UDim2.new(0, 40, 0, 6)
+    gearBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    gearBtn.BackgroundTransparency = 0.2
+    gearBtn.Text = "⚙️"
+    gearBtn.TextSize = 12
+    gearBtn.Font = Enum.Font.GothamBold
+    gearBtn.Parent = dock
+    Instance.new("UICorner", gearBtn).CornerRadius = UDim.new(1, 0)
+
+    local toggleMoved = makeDraggable(toggleBtn, dock)
+    local gearMoved = makeDraggable(gearBtn, dock)
+
+    -- Меню настроек
+    local menu = Instance.new("Frame")
+    menu.Name = "OptionsMenu"
+    menu.Size = UDim2.new(0, 160, 0, 0)
+    menu.AutomaticSize = Enum.AutomaticSize.Y
+    menu.Position = UDim2.new(0, 70, 0, 0)
+    menu.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    menu.BackgroundTransparency = 0.1
+    menu.Visible = false
+    menu.Parent = dock
+    Instance.new("UICorner", menu).CornerRadius = UDim.new(0, 10)
+
+    local pad = Instance.new("UIPadding", menu)
+    pad.PaddingTop = UDim.new(0, 8)
+    pad.PaddingBottom = UDim.new(0, 8)
+    pad.PaddingLeft = UDim.new(0, 8)
+    pad.PaddingRight = UDim.new(0, 8)
+
+    local layout = Instance.new("UIListLayout", menu)
+    layout.Padding = UDim.new(0, 5)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local function makeLabel(text, bold)
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(1, 0, 0, 0)
+        l.AutomaticSize = Enum.AutomaticSize.Y
+        l.BackgroundTransparency = 1
+        l.Text = text
+        l.TextColor3 = Color3.fromRGB(235, 235, 240)
+        l.TextSize = 11
+        l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+        l.TextWrapped = true
+        l.Parent = menu
+        return l
+    end
+
+    local function makeButton(text, active, callback)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 0, 26)
+        b.BackgroundColor3 = active and Color3.fromRGB(40, 120, 70) or Color3.fromRGB(45, 45, 55)
+        b.Text = text
+        b.TextColor3 = Color3.fromRGB(255, 255, 255)
+        b.TextSize = 11
+        b.Font = Enum.Font.GothamBold
+        b.Parent = menu
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+        b.MouseButton1Click:Connect(callback)
+        return b
+    end
+
+    refreshMenuFunc = function()
+        for _, c in ipairs(menu:GetChildren()) do
+            if c:IsA("GuiObject") then c:Destroy() end
+        end
+
+        local idx = selectedSkinIndex
+        local skin = idx and Skins[idx]
+        if not skin then
+            makeLabel("eguip a random skin to use this menu!")
+            return
+        end
+
+        local hasAnything = skin.Emotions or skin.Outfits or skin.R6ExclusiveIDs
+        if not hasAnything then
+            makeLabel("This skin doesnt have something to change!")
+            return
+        end
+
+        if skin.Outfits then
+            makeLabel("Одежда", true)
+            local current = outfitChoice[idx] or 1
+            for i, outfit in ipairs(skin.Outfits) do
+                makeButton(outfit.Name, i == current, function() setOutfit(idx, i) end)
+            end
+        end
+
+        if skin.Emotions then
+            makeLabel("Эмоция", true)
+            local current = emotionChoice[idx] or 1
+            for i, emo in ipairs(skin.Emotions) do
+                makeButton(emo.Name, i == current, function() setEmotion(idx, i) end)
+            end
+        end
+
+        if skin.R6ExclusiveIDs then
+            makeLabel("R6-детали (только R6)", true)
+            local on = r6Enabled[idx] ~= false
+            makeButton(on and "✅ Включены" or "❌ Выключены", on, function()
+                setR6Parts(idx, not on)
+            end)
+        end
+    end
+
+    gearBtn.MouseButton1Click:Connect(function()
+        if gearMoved() then return end
+        menu.Visible = not menu.Visible
+        if menu.Visible then refreshMenuFunc() end
+    end)
+
+    -- Колода карт
+    local cardContainer = Instance.new("Frame")
+    cardContainer.Size = UDim2.new(0, #Skins * CARD_STEP, 0, CARD_H + 10)
+    cardContainer.Position = UDim2.new(0.5, -(#Skins * CARD_STEP) / 2, 0.5, -CARD_H / 2)
+    cardContainer.BackgroundTransparency = 1
+    cardContainer.Visible = false
+    cardContainer.Parent = screenGui
+
+    local cardsList = {}
+    local isAnimating = false
+
+    openCardDeckFunc = function()
+        if isAnimating then return end
+        isAnimating = true
+        cardContainer.Visible = true
+        for i, cardObj in ipairs(cardsList) do
+            local targetX = (i - 1) * CARD_STEP
+            cardObj.Size = UDim2.new(0, CARD_W, 0, CARD_H)
+            cardObj.Rotation = 0
+            cardObj.Position = UDim2.new(0, targetX, 0, -450)
+            TweenService:Create(cardObj, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+                Position = UDim2.new(0, targetX, 0, 0)
+            }):Play()
+            task.wait(0.12)
+        end
+        isAnimating = false
+    end
+
+    for index, skinData in ipairs(Skins) do
+        local card = Instance.new("TextButton")
+        local defaultX = (index - 1) * CARD_STEP
+        card.Size = UDim2.new(0, CARD_W, 0, CARD_H)
+        card.Position = UDim2.new(0, defaultX, 0, -450)
+        card.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        card.AutoButtonColor = false
+        card.Text = ""
+        card.Parent = cardContainer
+        Instance.new("UICorner", card).CornerRadius = UDim.new(0, 12)
+
+        local cardGradient = Instance.new("UIGradient", card)
+        cardGradient.Color = ColorSequence.new(skinData.ColorStart, skinData.ColorEnd)
+        cardGradient.Rotation = 45
+
+        local title = Instance.new("TextLabel", card)
+        title.Size = UDim2.new(1, -10, 0, 34)
+        title.Position = UDim2.new(0, 5, 0, 8)
+        title.BackgroundTransparency = 1
+        title.Text = skinData.Name
+        title.TextColor3 = Color3.fromRGB(255, 255, 255)
+        title.TextSize = 12
+        title.Font = Enum.Font.GothamBold
+        title.TextWrapped = true
+
+        local desc = Instance.new("TextLabel", card)
+        desc.Size = UDim2.new(1, -10, 0, 80)
+        desc.Position = UDim2.new(0, 5, 0, 48)
+        desc.BackgroundTransparency = 1
+        desc.Text = skinData.Description
+        desc.TextColor3 = Color3.fromRGB(220, 220, 230)
+        desc.TextSize = 9
+        desc.Font = Enum.Font.Gotham
+        desc.TextWrapped = true
+
+        card.MouseButton1Click:Connect(function()
+            if isAnimating then return end
+            isAnimating = true
+            for idx, cObj in ipairs(cardsList) do
+                if idx ~= index then
+                    TweenService:Create(cObj, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                        Position = UDim2.new(cObj.Position.X.Scale, cObj.Position.X.Offset, 0, 500),
+                        Rotation = (idx < index) and -25 or 25
+                    }):Play()
+                end
+            end
+            TweenService:Create(card, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+                Size = UDim2.new(0, CARD_W + 12, 0, CARD_H + 18),
+                Position = UDim2.new(0, defaultX - 6, 0, -9)
+            }):Play()
+            task.wait(0.5)
+            TweenService:Create(card, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                Position = UDim2.new(0, defaultX - 6, 0, 500),
+                Rotation = 10
+            }):Play()
+            task.wait(0.45)
+            cardContainer.Visible = false
+            isAnimating = false
+            selectedSkinIndex = index
+            if refreshMenuFunc then refreshMenuFunc() end
+            if LocalPlayer.Character then applyMorph(LocalPlayer.Character, index) end
+        end)
+        table.insert(cardsList, card)
+    end
+
+    toggleBtn.MouseButton1Click:Connect(function()
+        if toggleMoved() then return end
+        if not isAnimating then
+            if cardContainer.Visible then cardContainer.Visible = false else openCardDeckFunc() end
+        end
+    end)
+
+    refreshMenuFunc()
+    screenGui.Parent = PlayerGui
+
+    task.spawn(function()
+        task.wait(0.3)
+        if openCardDeckFunc then openCardDeckFunc() end
+    end)
+end
+
+-- ==========================================
+-- ЗАПУСК
+-- ==========================================
+createCardUI()
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    if selectedSkinIndex then
+        task.wait(0.5)
+        applyMorph(char, selectedSkinIndex)
+    end
+end)
