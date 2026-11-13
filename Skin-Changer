@@ -18,7 +18,7 @@ local morphConn = nil
 local Skins = {
     {
         Name = "Capri (Cyberpunk)",
-        Description = "WE MAKING A FANARTS WITH THIS ONE🔥🔥",
+        Description = "at least she is cutie patootie :3",
         Outfits = {
             {Name = "👕 Вариант 1", ShirtId = 113791677446021, PantsId = 98356572400331},
             {Name = "👕 Вариант 2", ShirtId = 100899893266277, PantsId = 133930001642126},
